@@ -251,9 +251,11 @@ static class SelfTest
             var held = Path.Combine(dir, "held");
             CopyFolder(parts, held);
             var hb = Bundle.FromFiles(new[] { Path.Combine(held, Bundle.Name + ".part01") });
+            bool refused;
             using (new FileStream(Path.Combine(card, "lexical.db"), FileMode.Open, FileAccess.Read, FileShare.None))
-                Check(Throws(() => Installer.Install(hb, card, none, () => false, log, quiet)) && Same(lib2, card) &&
-                      File.Exists(Path.Combine(Installer.StagingOf(card), ".zayitmove-checked")), "a failed swap keeps the library there and the checked new one");
+                refused = Throws(() => Installer.Install(hb, card, none, () => false, log, quiet));
+            Check(refused && Same(lib2, card) && File.Exists(Path.Combine(Installer.StagingOf(card), ".zayitmove-checked")),
+                  "a failed swap keeps the library there and the checked new one");
             foreach (var f in Directory.GetFiles(held)) File.Delete(f);
             Installer.Install(hb, card, none, () => false, log, quiet);
             Check(Same(lib, card) && !Directory.Exists(Installer.StagingOf(card)), "the next install goes on from it, without the parts");
