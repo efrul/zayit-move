@@ -22,7 +22,7 @@ static class Theme
     public const string G_MIN = "", G_MAX = "", G_RESTORE = "", G_CLOSE = "",
                         G_FOLDER = "", G_DRIVE = "", G_USB = "", G_CHECK = "", G_WARN = "",
                         G_BACK = "", G_COPY = "", G_DELETE = "", G_INFO = "", G_OK = "",
-                        G_HISTORY = "", G_SWITCH = "", G_OPEN = "";
+                        G_HISTORY = "", G_SWITCH = "", G_OPEN = "", G_DOWNLOAD = "";
 
     public static readonly bool Dark;
     public static readonly Dictionary<string, string> P;
@@ -289,6 +289,35 @@ static class Theme
               <Setter TargetName='tick' Property='Visibility' Value='Visible'/>
             </Trigger>
             <Trigger Property='IsMouseOver' Value='True'><Setter TargetName='box' Property='BorderBrush' Value='$ACCENT$'/></Trigger>
+            <Trigger Property='IsEnabled' Value='False'><Setter Property='Opacity' Value='0.45'/></Trigger>
+          </ControlTemplate.Triggers>
+        </ControlTemplate>
+      </Setter.Value>
+    </Setter>
+  </Style>
+  <!-- Its radio button: the same, round, with a dot. -->
+  <Style TargetType='RadioButton'>
+    <Setter Property='Foreground' Value='$TEXT$'/>
+    <Setter Property='FontSize' Value='14'/>
+    <Setter Property='Cursor' Value='Hand'/>
+    <Setter Property='FocusVisualStyle' Value='{x:Null}'/>
+    <Setter Property='Template'>
+      <Setter.Value>
+        <ControlTemplate TargetType='RadioButton'>
+          <Grid Background='Transparent'>
+            <Grid.ColumnDefinitions><ColumnDefinition Width='Auto'/><ColumnDefinition/></Grid.ColumnDefinitions>
+            <Border x:Name='ring' Width='17' Height='17' CornerRadius='8.5' BorderThickness='1' BorderBrush='$OUTLINE$' Background='$FIELD$' VerticalAlignment='Center'>
+              <Ellipse x:Name='dot' Width='7' Height='7' Fill='$ONACCENT$' Visibility='Collapsed'/>
+            </Border>
+            <ContentPresenter Grid.Column='1' Margin='9,0,0,0' VerticalAlignment='Center'/>
+          </Grid>
+          <ControlTemplate.Triggers>
+            <Trigger Property='IsChecked' Value='True'>
+              <Setter TargetName='ring' Property='Background' Value='$ACCENT$'/>
+              <Setter TargetName='ring' Property='BorderBrush' Value='$ACCENT$'/>
+              <Setter TargetName='dot' Property='Visibility' Value='Visible'/>
+            </Trigger>
+            <Trigger Property='IsMouseOver' Value='True'><Setter TargetName='ring' Property='BorderBrush' Value='$ACCENT$'/></Trigger>
             <Trigger Property='IsEnabled' Value='False'><Setter Property='Opacity' Value='0.45'/></Trigger>
           </ControlTemplate.Triggers>
         </ControlTemplate>

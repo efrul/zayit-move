@@ -4,6 +4,7 @@ using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Text;
+using System.Text.RegularExpressions;
 using System.Threading;
 
 // Where desktop Zayit keeps its library, and moving it: copy, check, point Zayit there, and (unless a copy is to stay
@@ -15,10 +16,10 @@ static class Library
     // What a library is made of (what Zayit's onboarding unpacks), and what Zayit leaves next to it while open.
     public static readonly string[] Names =
         { "seforim.db", "seforim.db.lucene", "seforim.db.lookup.lucene", "lexical.db", "catalog.pb", "release_info.txt", "subset_info.txt" };
-    static readonly string[] Leftovers = { "seforim.db-wal", "seforim.db-shm", "seforim.db-journal", "delta-cache" };
+    public static readonly string[] Leftovers = { "seforim.db-wal", "seforim.db-shm", "seforim.db-journal", "delta-cache" };
 
     public const string FolderName = "Zayit library";
-    const long Margin = 200L << 20;
+    public const long Margin = 200L << 20;
 
     // Zayit's own folder (FileKit's databasesDir); ZAYITMOVE_DEFAULT_DIR replaces it in the tests.
     public static string DefaultDir
@@ -60,7 +61,45 @@ static class Library
         Environment.SetEnvironmentVariable("SEFORIMAPP_DATABASE_PATH", null, EnvironmentVariableTarget.User);
     }
 
-    public static bool Exists(string dir) { return dir != null && File.Exists(Path.Combine(dir, "seforim.db")); }
+    // A library Zayit can open. A database cut in pieces is not one (see IsSplit).
+    public static bool Exists(string dir) { return dir != null && File.Exists(Path.Combine(dir, "seforim.db")) && !IsSplit(dir); }
+
+    // seforim.db kept as seforim.db, seforim.db001, seforim.db002... (SQLite's multiplex VFS), as Pardes keeps it on a
+    // FAT32 memory card. Desktop Zayit's SQLite has no such VFS: it would find seforim.db, then fail on it as
+    // "malformed".
+    public static bool IsSplit(string dir) { return dir != null && File.Exists(Path.Combine(dir, "seforim.db001")); }
+
+    // The pieces after seforim.db of a split database, as they are on disk.
+    public static List<string> Chunks(string dir)
+    {
+        try { return Directory.GetFiles(dir, "seforim.db???").Where(f => Regex.IsMatch(Path.GetFileName(f), @"^seforim\.db\d{3}$")).ToList(); }
+        catch { return new List<string>(); }
+    }
+
+    // Whether a database file is whole, by its header: the page count times the page size must be its length (the
+    // count is kept only while "version-valid-for" matches the change counter). A piece of a split database, or a copy
+    // cut short, fails here, where Zayit would only see it when opening it.
+    public static bool Whole(string db)
+    {
+        try
+        {
+            using (var f = new FileStream(db, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
+            {
+                var h = new byte[100];
+                int got = 0, n;
+                while (got < h.Length && (n = f.Read(h, got, h.Length - got)) > 0) got += n;
+                if (got < h.Length || Encoding.ASCII.GetString(h, 0, 16) != "SQLite format 3\0") return false;
+                long page = h[16] << 8 | h[17];
+                if (page == 1) page = 65536;
+                uint change = BigEndian(h, 24), pages = BigEndian(h, 28), valid = BigEndian(h, 92);
+                if (change != valid || pages == 0) return true;
+                return page * pages == f.Length;
+            }
+        }
+        catch { return false; }
+    }
+
+    static uint BigEndian(byte[] b, int i) { return (uint)(b[i] << 24 | b[i + 1] << 16 | b[i + 2] << 8 | b[i + 3]); }
 
     public static bool Same(string a, string b)
     {
@@ -120,6 +159,43 @@ static class Library
         catch { return -1; }
     }
 
+    // FAT32 (or FAT) on the drive of `dir`: it takes no file of 4 GiB or more, and seforim.db is about 8 GB.
+    public static bool IsFat(string dir)
+    {
+        try
+        {
+            var d = new DriveInfo(Path.GetPathRoot(Path.GetFullPath(dir)));
+            return d.IsReady && d.DriveFormat.StartsWith("FAT", StringComparison.OrdinalIgnoreCase);
+        }
+        catch { return false; }
+    }
+
+    public static string FatText(string dir)
+    {
+        var root = Path.GetPathRoot(Path.GetFullPath(dir)).TrimEnd('\\');
+        return "הכונן " + root + " מפורמט כ־FAT32, שלא יכול לשמור קובץ של 4 GB ומעלה, והקובץ seforim.db שוקל כ־8 GB. " +
+               "אפשר לפרמט אותו כ־exFAT (הפירמוט מוחק את כל מה שעליו), או להמיר אותו ל־NTFS בלי למחוק דבר, בפקודה convert " + root + " /fs:ntfs " +
+               "בשורת פקודה של מנהל. כרטיס ב־NTFS לא נקרא בטלפון, ולכן לכרטיס שמשמש גם את פרדס עדיף exFAT.";
+    }
+
+    // The largest file of the library in `dir` (seforim.db, about 8 GB).
+    public static long Largest(string dir)
+    {
+        long max = 0;
+        foreach (var name in Names)
+        {
+            var p = Path.Combine(dir, name);
+            try
+            {
+                if (File.Exists(p)) max = Math.Max(max, new FileInfo(p).Length);
+                else if (Directory.Exists(p))
+                    foreach (var f in new DirectoryInfo(p).EnumerateFiles("*", SearchOption.AllDirectories)) max = Math.Max(max, f.Length);
+            }
+            catch { }
+        }
+        return max;
+    }
+
     public static string DriveLabel(string dir)
     {
         try
@@ -155,6 +231,47 @@ static class Library
         return false;
     }
 
+    // What Zayit will open after it is pointed at `dir`: `pointed`, unless the environment variable wins.
+    public static string Opens(string dir, string pointed)
+    {
+        if (EnvOverride == null) return pointed;
+        return "הספרייה מוכנה ב־" + Fmt.ShortPath(dir, 60) + ", אבל זית עדיין פותחת את הספרייה שנקבעה ב־SEFORIMAPP_DATABASE_PATH, עד שמבטלים את ההפניה למעלה.";
+    }
+
+    // Zayit keeps, in pending-db-cleanup.txt in its own folder, the paths its library update could not delete, and
+    // deletes them at its next start (PendingDbCleanup, desktop 0.6.6). A library put in their place must leave that
+    // list, or Zayit deletes it.
+    public static void DropPendingCleanup(string dir)
+    {
+        try
+        {
+            var marker = Path.Combine(DefaultDir, "pending-db-cleanup.txt");
+            if (!File.Exists(marker)) return;
+            var root = Path.GetFullPath(dir).TrimEnd(Path.DirectorySeparatorChar);
+            var keep = File.ReadAllLines(marker).Where(l =>
+            {
+                var t = l.Trim();
+                if (t.Length == 0) return false;
+                try
+                {
+                    var p = Path.GetFullPath(t).TrimEnd(Path.DirectorySeparatorChar);
+                    return !p.Equals(root, StringComparison.OrdinalIgnoreCase) && !p.StartsWith(root + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase);
+                }
+                catch { return true; }
+            }).ToList();
+            if (keep.Count == 0) File.Delete(marker);
+            else File.WriteAllText(marker, string.Join("\n", keep));
+        }
+        catch { }
+    }
+
+    // Bytes in a folder and all under it; 0 when it is not there.
+    public static long TreeSize(string dir)
+    {
+        try { return Directory.Exists(dir) ? new DirectoryInfo(dir).EnumerateFiles("*", SearchOption.AllDirectories).Sum(f => f.Length) : 0; }
+        catch { return 0; }
+    }
+
     // Points Zayit at the library in `dir` ("" for its own folder, as Zayit itself writes it).
     public static void PointZayitAt(string dir)
     {
@@ -177,12 +294,18 @@ static class Library
         if (Same(from, to)) throw new Problem("הספרייה כבר נמצאת שם.");
         if (to.StartsWith(from.TrimEnd('\\') + "\\", StringComparison.OrdinalIgnoreCase)) throw new Problem("אי אפשר להעביר את הספרייה לתוך התיקייה שלה.");
         if (Exists(to)) throw new Problem("כבר יש ספרייה ב־" + to + ".");
+        // Library files that are no library (a split database, what a failed update left) are never copied over: a
+        // failed copy cleans up the names it writes
+        if (IsSplit(to)) throw new Problem("ב־" + to + " יש ספרייה מפוצלת לחלקים, שזית למחשב לא יכולה לפתוח. אפשר להתקין שם ספרייה שלמה במקומה, בכרטיס \"התקנת הספרייה\".");
+        var there = Names.Where(n => File.Exists(Path.Combine(to, n)) || Directory.Exists(Path.Combine(to, n))).ToList();
+        if (there.Count > 0) throw new Problem("כבר יש ב־" + to + " קבצים של ספרייה (" + string.Join(", ", there) + "). אפשר להתקין שם ספרייה במקומם, בכרטיס \"התקנת הספרייה\", או למחוק אותם ולנסות שוב.");
         CheckClosed();
         var wal = new FileInfo(Path.Combine(from, "seforim.db-wal"));
         if (wal.Exists && wal.Length > 0) throw new Problem("זית לא נסגרה כראוי (seforim.db-wal אינו ריק). יש לפתוח ולסגור אותה, ולנסות שוב.");
 
         long total = Size(from);
         bool sameDrive = string.Equals(Path.GetPathRoot(from), Path.GetPathRoot(to), StringComparison.OrdinalIgnoreCase);
+        if (!sameDrive && IsFat(to) && Largest(from) > Installer.Fat32Max) throw new Problem(FatText(to));
         if (keep || !sameDrive)
         {
             long free = Free(to);
@@ -217,8 +340,9 @@ static class Library
             log("הועתקו " + Fmt.Size(total) + " ונבדקו.");
         }
 
+        DropPendingCleanup(to);
         PointZayitAt(to);
-        log("זית תפתח מעכשיו את הספרייה מהמקום החדש.");
+        log(Opens(to, "זית תפתח מעכשיו את הספרייה מהמקום החדש."));
         History.Add(keep ? "copy" : "move", from, to, total);
 
         if (!keep && !(sameDrive))
@@ -244,9 +368,10 @@ static class Library
         if (!Exists(dir)) throw new Problem("אין ספרייה ב־" + dir + ".");
         CheckClosed();
         var before = CurrentDir;
+        DropPendingCleanup(dir);
         PointZayitAt(dir);
         History.Add("switch", before, dir, Size(dir));
-        log("זית תפתח מעכשיו את הספרייה מ־" + Fmt.ShortPath(dir, 60));
+        log(Opens(dir, "זית תפתח מעכשיו את הספרייה מ־" + Fmt.ShortPath(dir, 60)));
     }
 
     // Zayit back to its own folder, whatever is there (with no library, Zayit offers to download one).
@@ -256,7 +381,7 @@ static class Library
         var before = CurrentDir;
         Prefs.Set("database_path", "");
         History.Add("reset", before, DefaultDir, 0);
-        log("זית תחפש מעכשיו את הספרייה בתיקייה הרגילה שלה.");
+        log(Opens(DefaultDir, "זית תחפש מעכשיו את הספרייה בתיקייה הרגילה שלה."));
     }
 
     // Deletes a copy Zayit does not use.
@@ -339,7 +464,7 @@ static class Library
         log("הספרייה הועברה באותו כונן, בלי העתקה.");
     }
 
-    static bool Remove(string p)
+    public static bool Remove(string p)
     {
         try
         {
@@ -356,7 +481,7 @@ static class Library
         if (string.Equals(Path.GetFileName(dir.TrimEnd('\\')), FolderName, StringComparison.OrdinalIgnoreCase)) TryRemoveEmpty(dir);
     }
 
-    static void TryRemoveEmpty(string dir)
+    public static void TryRemoveEmpty(string dir)
     {
         try { if (Directory.Exists(dir) && !Directory.EnumerateFileSystemEntries(dir).Any()) Directory.Delete(dir); } catch { }
     }
@@ -435,7 +560,11 @@ static class History
 
 class Problem : Exception { public Problem(string m) : base(m) { } }
 
-class Stopped : Exception { public Stopped() : base("ההעתקה נעצרה. הספרייה נשארה במקומה.") { } }
+class Stopped : Exception
+{
+    public Stopped() : base("ההעתקה נעצרה. הספרייה נשארה במקומה.") { }
+    public Stopped(string m) : base(m) { }
+}
 
 static class Fmt
 {
