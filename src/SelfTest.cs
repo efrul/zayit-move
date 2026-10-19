@@ -239,9 +239,26 @@ static class SelfTest
         var old = card + ".old";
         Directory.CreateDirectory(old);
         File.WriteAllText(Path.Combine(old, "seforim.db"), "the only copy");
-        Check(Throws(() => Installer.Install(Bundle.FromFiles(new[] { Path.Combine(parts2, Bundle.Name + ".part01") }), card, none, () => false, log, quiet)) &&
-              File.ReadAllText(Path.Combine(old, "seforim.db")) == "the only copy" && Same(lib2, card), "a library left aside by a failed swap is never deleted");
+        Installer.Install(Bundle.FromFiles(new[] { Path.Combine(parts2, Bundle.Name + ".part01") }), card, none, () => false, log, quiet);
+        Check(File.ReadAllText(Path.Combine(old, "seforim.db")) == "the only copy" && Same(lib2, card) &&
+              !Directory.GetDirectories(Path.GetDirectoryName(card), Library.FolderName + ".old-*").Any(), "a folder of that name next to it is left alone");
         Directory.Delete(old, true);
+
+        // A swap that fails (a file held open in the library) keeps the checked library, and the next install goes on
+        // from it without reading the parts again. Only Windows refuses to rename a file held open.
+        if (Path.DirectorySeparatorChar == '\\')
+        {
+            var held = Path.Combine(dir, "held");
+            CopyFolder(parts, held);
+            var hb = Bundle.FromFiles(new[] { Path.Combine(held, Bundle.Name + ".part01") });
+            using (new FileStream(Path.Combine(card, "lexical.db"), FileMode.Open, FileAccess.Read, FileShare.None))
+                Check(Throws(() => Installer.Install(hb, card, none, () => false, log, quiet)) && Same(lib2, card) &&
+                      File.Exists(Path.Combine(Installer.StagingOf(card), ".zayitmove-checked")), "a failed swap keeps the library there and the checked new one");
+            foreach (var f in Directory.GetFiles(held)) File.Delete(f);
+            Installer.Install(hb, card, none, () => false, log, quiet);
+            Check(Same(lib, card) && !Directory.Exists(Installer.StagingOf(card)), "the next install goes on from it, without the parts");
+            Installer.Install(Bundle.FromFiles(new[] { Path.Combine(parts2, Bundle.Name + ".part01") }), card, none, () => false, log, quiet);
+        }
 
         // 16. Downloaded, from a small server that redirects as GitHub does and breaks one connection half way
         using (var server = new TestServer(parts2, "v3-20261019000000"))

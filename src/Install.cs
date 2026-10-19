@@ -35,7 +35,25 @@ static class Installer
     // The folders next to `to` that an install uses: the new library while it is unpacked, the old one while it is
     // replaced.
     public static string StagingOf(string to) { return to.TrimEnd(Path.DirectorySeparatorChar) + ".installing"; }
-    static string OldOf(string to) { return to.TrimEnd(Path.DirectorySeparatorChar) + ".old"; }
+
+    // A new folder each time, so that nothing already there (an old library a failed undo left, a folder of the
+    // user's) is ever deleted with it.
+    static string NewOldOf(string to)
+    {
+        var at = to.TrimEnd(Path.DirectorySeparatorChar) + ".old-" + DateTime.Now.ToString("yyyyMMdd-HHmmss");
+        var p = at;
+        for (int i = 2; Directory.Exists(p) || File.Exists(p); i++) p = at + "-" + i;
+        return p;
+    }
+
+    // Written into staging once what is there is unpacked and checked: which bundle it is. A swap that failed keeps
+    // staging, and the next install of the same bundle goes on from it instead of unpacking it again.
+    const string CheckedName = ".zayitmove-checked";
+
+    static string Identity(Bundle b)
+    {
+        return string.Join("\n", b.Parts.Select(p => p.Name + " " + p.Size + " " + (p.Sha256 ?? "")));
+    }
 
     // Installs `bundle` (null: the latest release, downloaded) into `to`, replacing a library already there only once
     // the new one is complete and checked, and points Zayit at it.
@@ -44,35 +62,40 @@ static class Installer
         to = Path.GetFullPath(to);
         if (Library.IsFat(to)) throw new Problem(Library.FatText(to));
         string before = Library.CurrentDir;
-        string staging = StagingOf(to), old = OldOf(to);
+        string staging = StagingOf(to), stamp = Path.Combine(staging, CheckedName);
         // Windows takes paths of up to 260 characters here (248 for a folder); the bundle's longest name is 54
         if (staging.Length + 64 >= 248) throw new Problem("הנתיב " + Fmt.ShortPath(to, 60) + " ארוך מדי לקובצי הספרייה. כדאי לבחור תיקייה קרובה יותר לשורש הכונן.");
-        bool done = false;
+        bool done = false, keep = false;
         try
         {
-            // What an earlier install left: a stop or a crash its staging, a failed swap the old library
-            Library.Remove(staging);
-            if (Directory.Exists(old))
-            {
-                if (File.Exists(Path.Combine(old, "seforim.db")))
-                    throw new Problem("בתיקייה " + old + " נשארה הספרייה הקודמת, מהחלפה שלא הסתיימה. כדאי לבדוק אם צריך ממנה משהו ולמחוק אותה, ואז להתקין שוב.");
-                if (!Library.Remove(old)) throw new Problem("לא ניתן למחוק את התיקייה " + old + ", שנשארה מהתקנה קודמת. כדאי למחוק אותה ידנית ולנסות שוב.");
-            }
             if (bundle == null)
             {
                 stage("מחפש את המהדורה האחרונה של הספרייה…");
                 bundle = Bundle.Latest(cancelled);
             }
             if (cancelled()) throw new Stopped();
-            long need = Unpacked(bundle.Size) + Library.Margin;
-            long free = Library.Free(to);
-            if (free < 0) throw new Problem("הכונן " + Path.GetPathRoot(to) + " לא זמין.");
-            if (free < need) throw new Problem("אין מספיק מקום ב־" + Path.GetPathRoot(to) + ": צריך כ־" + Fmt.Size(need) + ", פנויים " + Fmt.Size(free) + ".");
-
-            Directory.CreateDirectory(staging);
-            Unpack(bundle, staging, progress, cancelled, stage);
-            stage("בודק את הספרייה…");
-            Check(staging);
+            string identity = Identity(bundle);
+            if (File.Exists(stamp) && File.ReadAllText(stamp) == identity)
+            {
+                // The same bundle, unpacked and checked by an install whose swap failed
+                stage("ממשיך מההתקנה הקודמת, שהספרייה שלה כבר נפרסה ונבדקה…");
+                progress(bundle.Size, bundle.Size);
+                Check(staging);
+            }
+            else
+            {
+                // What a stop or a crash left goes before the room is measured
+                Library.Remove(staging);
+                long need = Unpacked(bundle.Size) + Library.Margin;
+                long free = Library.Free(to);
+                if (free < 0) throw new Problem("הכונן " + Path.GetPathRoot(to) + " לא זמין.");
+                if (free < need) throw new Problem("אין מספיק מקום ב־" + Path.GetPathRoot(to) + ": צריך כ־" + Fmt.Size(need) + ", פנויים " + Fmt.Size(free) + ".");
+                Directory.CreateDirectory(staging);
+                Unpack(bundle, staging, progress, cancelled, stage);
+                stage("בודק את הספרייה…");
+                Check(staging);
+                File.WriteAllText(stamp, identity);
+            }
             for (;;)
             {
                 if (cancelled()) throw new Stopped();
@@ -81,7 +104,8 @@ static class Installer
                 Thread.Sleep(500);
             }
             stage(Committing);
-            Swap(staging, to, old, log);
+            try { Swap(staging, to, NewOldOf(to), log); }
+            catch (Kept) { keep = true; throw; }
             done = true;
         }
         catch (Stopped) { throw new Stopped(StoppedText); }
@@ -101,7 +125,7 @@ static class Installer
         }
         finally
         {
-            if (!done) Library.Remove(staging);
+            if (!done && !keep) Library.Remove(staging);
         }
 
         Library.DropPendingCleanup(to);
@@ -181,7 +205,7 @@ static class Installer
     {
         Directory.CreateDirectory(to);
         Directory.CreateDirectory(old);
-        var incoming = Directory.GetFileSystemEntries(staging).Select(Path.GetFileName).ToList();
+        var incoming = Directory.GetFileSystemEntries(staging).Select(Path.GetFileName).Where(n => n != CheckedName).ToList();
         var aside = new List<string> { "seforim.db" };
         aside.AddRange(Library.Chunks(to).Select(Path.GetFileName));
         aside.AddRange(Library.Leftovers);
@@ -198,20 +222,34 @@ static class Installer
         }
         catch (Exception e)
         {
-            var stuck = new List<string>();
+            var oldStuck = new List<string>();
+            var newStuck = new List<string>();
             for (int i = moves.Count - 1; i >= 0; i--)
             {
                 try { Move(moves[i].Value, moves[i].Key); }
-                catch { if (moves[i].Value.StartsWith(old, StringComparison.OrdinalIgnoreCase)) stuck.Add(Path.GetFileName(moves[i].Key)); }
+                catch
+                {
+                    if (moves[i].Value.StartsWith(old, StringComparison.OrdinalIgnoreCase)) oldStuck.Add(Path.GetFileName(moves[i].Key));
+                    else newStuck.Add(Path.GetFileName(moves[i].Value));
+                }
             }
             Library.TryRemoveEmpty(old);
-            if (stuck.Count == 0) throw new Problem("הכנסת הספרייה למקומה נכשלה (" + e.Message.TrimEnd('.') + "). הספרייה שהייתה שם נשארה כמו שהייתה.");
-            throw new Problem("הכנסת הספרייה למקומה נכשלה (" + e.Message.TrimEnd('.') + "), וגם ההחזרה לא הושלמה: " + string.Join(", ", stuck) +
-                              " של הספרייה הקודמת נשארו בתיקייה " + old + ". אפשר להחזיר אותם ידנית ל־" + to + ".");
+            var why = "הכנסת הספרייה למקומה נכשלה (" + e.Message.TrimEnd('.') + ")";
+            if (oldStuck.Count == 0 && newStuck.Count == 0)
+                throw new Kept(why + ". הספרייה שהייתה שם נשארה כמו שהייתה, והחדשה, שכבר נבדקה, נשמרה ליד: ההתקנה הבאה תמשיך ממנה.");
+            File.Delete(Path.Combine(staging, CheckedName));
+            var msg = why + ", וגם ההחזרה לא הושלמה.";
+            if (oldStuck.Count > 0) msg += " מהספרייה הקודמת נשארו בתיקייה " + old + ": " + string.Join(", ", oldStuck) + ". אפשר להחזיר אותם ידנית ל־" + to + ".";
+            if (newStuck.Count > 0) msg += " מהספרייה החדשה נשארו ב־" + to + ": " + string.Join(", ", newStuck) + ".";
+            throw new Problem(msg);
         }
         if (!Library.Remove(old)) log("מה שנשאר מהספרייה הקודמת, בתיקייה " + Fmt.ShortPath(old, 60) + ", לא נמחק כולו. אפשר למחוק אותו ידנית.");
+        try { File.Delete(Path.Combine(staging, CheckedName)); } catch { }
         Library.TryRemoveEmpty(staging);
     }
+
+    // A swap that failed and was undone in full: staging holds the checked library and is kept.
+    sealed class Kept : Problem { public Kept(string m) : base(m) { } }
 
     static void Rename(string from, string to, List<KeyValuePair<string, string>> moves)
     {
@@ -220,7 +258,7 @@ static class Installer
         moves.Add(new KeyValuePair<string, string>(from, to));
     }
 
-    // A rename, tried again for a few seconds: a file just closed may still be held for a moment by an indexer or an
+    // A rename, tried again for 10 seconds: a file just closed may still be held for a while by an indexer or an
     // antivirus.
     static void Move(string from, string to)
     {
@@ -231,9 +269,9 @@ static class Installer
                 if (Directory.Exists(from)) Directory.Move(from, to); else File.Move(from, to);
                 return;
             }
-            catch (IOException) { if (i >= 10) throw; }
-            catch (UnauthorizedAccessException) { if (i >= 10) throw; }
-            Thread.Sleep(300);
+            catch (IOException) { if (i >= 20) throw; }
+            catch (UnauthorizedAccessException) { if (i >= 20) throw; }
+            Thread.Sleep(500);
         }
     }
 

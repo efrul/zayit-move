@@ -381,7 +381,7 @@ static class Library
         var before = CurrentDir;
         Prefs.Set("database_path", "");
         History.Add("reset", before, DefaultDir, 0);
-        log("זית תחפש מעכשיו את הספרייה בתיקייה הרגילה שלה.");
+        log(Opens(DefaultDir, "זית תחפש מעכשיו את הספרייה בתיקייה הרגילה שלה."));
     }
 
     // Deletes a copy Zayit does not use.

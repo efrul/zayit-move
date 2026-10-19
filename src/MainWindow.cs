@@ -33,7 +33,7 @@ class MainWindow : Window
     long done, total;
     volatile string stage;          // what the work does now, under its progress bar
     bool closeTried;                // the window was asked to close while the work runs
-    DateTime started;
+    long started;                   // on the clock below, in milliseconds
     readonly List<KeyValuePair<string, bool>> messages = new List<KeyValuePair<string, bool>>(); // text, is error
 
     TextBlock progressText, stageText;
@@ -383,7 +383,7 @@ class MainWindow : Window
         long leftover = Library.TreeSize(Installer.StagingOf(installTo));
         if (free >= 0) free += leftover;
         if (leftover > 0)
-            rows.Add(Theme.Note(Theme.G_INFO, "נמצאה שם תיקייה זמנית מהתקנה קודמת שלא הסתיימה (" + Fmt.Size(leftover) + "). היא תימחק בתחילת ההתקנה.", "TEXT", "ACCENTSOFT"));
+            rows.Add(Theme.Note(Theme.G_INFO, "נמצאה שם תיקייה זמנית מהתקנה קודמת שלא הסתיימה (" + Fmt.Size(leftover) + "). אם היא מאותה מהדורה וכבר נבדקה, ההתקנה תמשיך ממנה; אחרת היא תימחק בתחילת ההתקנה.", "TEXT", "ACCENTSOFT"));
         var needRow = Theme.Pair("נדרשים", "כ־" + Fmt.Size(need));
         needRow.Margin = new Thickness(0, 12, 0, 2);
         rows.Add(needRow);
@@ -517,7 +517,7 @@ class MainWindow : Window
         lastTick = -1000;
         done = 0;
         total = 0;
-        started = DateTime.Now;
+        started = clock.ElapsedMilliseconds;
         Render();
         worker = new Thread(() =>
         {
@@ -559,7 +559,9 @@ class MainWindow : Window
         stageText.Visibility = stage == null ? Visibility.Collapsed : Visibility.Visible;
         stopBtn = Theme.Btn(this, "עצירה", "Outlined", () => { stop = true; progressText.Text = "עוצר…"; });
         stopBtn.IsEnabled = stage != Installer.Committing;
-        var closing = closeTried ? Theme.Note(Theme.G_WARN, "יש לעצור את " + task + " לפני הסגירה.", "WARN", "WARNSOFT") : null;
+        var closing = !closeTried ? null : Theme.Note(Theme.G_WARN, stage == Installer.Committing
+            ? "הספרייה נכנסת עכשיו למקומה. אפשר יהיה לסגור בעוד רגע."
+            : "יש לעצור את " + task + " לפני הסגירה.", "WARN", "WARNSOFT");
         return Theme.Card(Theme.Title(task == null ? "" : task.Substring(1)), closing, stageText, progressTrack, progressText, Theme.Row(stopBtn),
                     Theme.T(task == "ההתקנה"
                         ? "אפשר לעצור בכל רגע לפני הסוף: מה שכבר נכתב נמחק, ושום דבר אחר לא משתנה."
@@ -587,7 +589,7 @@ class MainWindow : Window
         if (stop) return;
         // All read: what follows (the check, the wait for Zayit) is told by the stage line
         if (done >= total) { progressText.Text = Fmt.Size(total); return; }
-        var secs = (DateTime.Now - started).TotalSeconds;
+        var secs = (clock.ElapsedMilliseconds - started) / 1000.0;
         string speed = "", left = "";
         if (secs > 2 && done > 0)
         {
