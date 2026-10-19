@@ -164,7 +164,12 @@ static class SelfTest
         var bytes = File.ReadAllBytes(p2);
         bytes[bytes.Length / 2] ^= 0x20;
         File.WriteAllBytes(p2, bytes);
-        Check(Throws(() => Installer.Install(Bundle.FromFiles(new[] { p2 }), card, none, () => false, log, quiet)), "a damaged part is refused");
+        try
+        {
+            Installer.Install(Bundle.FromFiles(new[] { p2 }), card, none, () => false, log, quiet);
+            Check(false, "a damaged part is refused");
+        }
+        catch (Problem e) { Check(e.Message.Contains(Bundle.Name + ".part02") && e.Message.Contains("sha256"), "a damaged part is refused by its sha256: " + e.Message); }
         Check(Same(lib, card) && !Directory.Exists(card + ".installing") && Library.Same(Library.CurrentDir, card), "after the refusal the library is as it was");
 
         // 11. A newer release over it, in its place
@@ -196,6 +201,18 @@ static class SelfTest
         File.Delete(Path.Combine(bare, Bundle.Name + ".part03"));
         Check(Throws(() => Bundle.FromFiles(new[] { Path.Combine(bare, Bundle.Name + ".part01") })), "a missing last part is noticed without the manifest");
 
+        // ... and without it a damaged part is caught by the zstd checksum instead
+        var badBare = Path.Combine(dir, "damaged-bare");
+        CopyFolder(bad, badBare);
+        File.Delete(Path.Combine(badBare, Bundle.Name + ".manifest.json"));
+        var third = Path.Combine(dir, "third", Library.FolderName);
+        try
+        {
+            Installer.Install(Bundle.FromFiles(new[] { Path.Combine(badBare, Bundle.Name + ".part01") }), third, none, () => false, log, quiet);
+            Check(false, "a damaged part without a manifest is refused");
+        }
+        catch (Problem e) { Check(e.Message.Contains("checksum") && !Directory.Exists(third), "a damaged part without a manifest is refused by the zstd checksum"); }
+
         // 14. A database cut in pieces, as Pardes keeps it on a FAT32 card, is no library for Zayit on the computer
         var split = Path.Combine(dir, "split");
         Directory.CreateDirectory(split);
@@ -205,12 +222,32 @@ static class SelfTest
         File.WriteAllText(Path.Combine(split, "release_info.txt"), "20261012193827");
         Check(Library.IsSplit(split) && !Library.Exists(split) && !Library.Whole(Path.Combine(split, "seforim.db")), "a split database is told apart");
         Check(Library.Whole(Path.Combine(card, "seforim.db")), "a whole database passes the header check");
+        Check(Throws(() => Library.Move(card, split, true, none, () => false, log)) && Library.IsSplit(split) && File.Exists(Path.Combine(split, "seforim.db")),
+              "a move onto a split library is refused, and leaves it as it was");
 
-        // 15. Downloaded, from a small server that redirects as GitHub does and breaks one connection half way
+        // 15. What an install that did not end left, and Zayit's list of paths to delete at its next start
+        Directory.CreateDirectory(Path.Combine(Installer.StagingOf(card), "seforim.db.lucene"));
+        File.WriteAllText(Path.Combine(Installer.StagingOf(card), "seforim.db"), "half");
+        Directory.CreateDirectory(Library.DefaultDir);
+        var marker = Path.Combine(Library.DefaultDir, "pending-db-cleanup.txt");
+        var elsewhere = Path.Combine(dir, "elsewhere", "seforim.db");
+        File.WriteAllText(marker, Path.Combine(card, "seforim.db") + "\n" + Path.Combine(card, "seforim.db.lucene") + "\n" + elsewhere);
+        Installer.Install(Bundle.FromFiles(new[] { Path.Combine(parts2, Bundle.Name + ".part01") }), card, none, () => false, log, quiet);
+        Check(Same(lib2, card) && !Directory.Exists(Installer.StagingOf(card)), "a leftover staging folder is cleared and the install goes through");
+        Check(File.ReadAllText(marker).Trim() == elsewhere, "Zayit's cleanup list loses the paths of the new library, and keeps the others");
+        File.Delete(marker);
+        var old = card + ".old";
+        Directory.CreateDirectory(old);
+        File.WriteAllText(Path.Combine(old, "seforim.db"), "the only copy");
+        Check(Throws(() => Installer.Install(Bundle.FromFiles(new[] { Path.Combine(parts2, Bundle.Name + ".part01") }), card, none, () => false, log, quiet)) &&
+              File.ReadAllText(Path.Combine(old, "seforim.db")) == "the only copy" && Same(lib2, card), "a library left aside by a failed swap is never deleted");
+        Directory.Delete(old, true);
+
+        // 16. Downloaded, from a small server that redirects as GitHub does and breaks one connection half way
         using (var server = new TestServer(parts2, "v3-20261019000000"))
         {
             Environment.SetEnvironmentVariable("ZAYITMOVE_RELEASES", server.Url + "releases");
-            var latest = Bundle.Latest();
+            var latest = Bundle.Latest(() => false);
             Check(latest.Online && latest.Release == "v3-20261019000000" && latest.Parts.Count == 3, "the latest release found through its redirect");
             var web = Path.Combine(dir, "web", Library.FolderName);
             Installer.Install(null, web, none, () => false, log, quiet);
@@ -219,7 +256,7 @@ static class SelfTest
             Environment.SetEnvironmentVariable("ZAYITMOVE_RELEASES", null);
         }
 
-        // 16. zstd's own compression (level 19: Huffman literals in 4 streams, FSE tables, every kind of repeat offset)
+        // 17. zstd's own compression (level 19: Huffman literals in 4 streams, FSE tables, every kind of repeat offset)
         using (var z = new ZstdDecodeStream(new MemoryStream(Convert.FromBase64String(Sample))))
         using (var o = new MemoryStream())
         {

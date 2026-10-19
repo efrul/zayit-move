@@ -231,6 +231,47 @@ static class Library
         return false;
     }
 
+    // What Zayit will open after it is pointed at `dir`: `pointed`, unless the environment variable wins.
+    public static string Opens(string dir, string pointed)
+    {
+        if (EnvOverride == null) return pointed;
+        return "הספרייה מוכנה ב־" + Fmt.ShortPath(dir, 60) + ", אבל זית עדיין פותחת את הספרייה שנקבעה ב־SEFORIMAPP_DATABASE_PATH, עד שמבטלים את ההפניה למעלה.";
+    }
+
+    // Zayit keeps, in pending-db-cleanup.txt in its own folder, the paths its library update could not delete, and
+    // deletes them at its next start (PendingDbCleanup, desktop 0.6.6). A library put in their place must leave that
+    // list, or Zayit deletes it.
+    public static void DropPendingCleanup(string dir)
+    {
+        try
+        {
+            var marker = Path.Combine(DefaultDir, "pending-db-cleanup.txt");
+            if (!File.Exists(marker)) return;
+            var root = Path.GetFullPath(dir).TrimEnd(Path.DirectorySeparatorChar);
+            var keep = File.ReadAllLines(marker).Where(l =>
+            {
+                var t = l.Trim();
+                if (t.Length == 0) return false;
+                try
+                {
+                    var p = Path.GetFullPath(t).TrimEnd(Path.DirectorySeparatorChar);
+                    return !p.Equals(root, StringComparison.OrdinalIgnoreCase) && !p.StartsWith(root + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase);
+                }
+                catch { return true; }
+            }).ToList();
+            if (keep.Count == 0) File.Delete(marker);
+            else File.WriteAllText(marker, string.Join("\n", keep));
+        }
+        catch { }
+    }
+
+    // Bytes in a folder and all under it; 0 when it is not there.
+    public static long TreeSize(string dir)
+    {
+        try { return Directory.Exists(dir) ? new DirectoryInfo(dir).EnumerateFiles("*", SearchOption.AllDirectories).Sum(f => f.Length) : 0; }
+        catch { return 0; }
+    }
+
     // Points Zayit at the library in `dir` ("" for its own folder, as Zayit itself writes it).
     public static void PointZayitAt(string dir)
     {
@@ -253,6 +294,11 @@ static class Library
         if (Same(from, to)) throw new Problem("הספרייה כבר נמצאת שם.");
         if (to.StartsWith(from.TrimEnd('\\') + "\\", StringComparison.OrdinalIgnoreCase)) throw new Problem("אי אפשר להעביר את הספרייה לתוך התיקייה שלה.");
         if (Exists(to)) throw new Problem("כבר יש ספרייה ב־" + to + ".");
+        // Library files that are no library (a split database, what a failed update left) are never copied over: a
+        // failed copy cleans up the names it writes
+        if (IsSplit(to)) throw new Problem("ב־" + to + " יש ספרייה מפוצלת לחלקים, שזית למחשב לא יכולה לפתוח. אפשר להתקין שם ספרייה שלמה במקומה, בכרטיס \"התקנת הספרייה\".");
+        var there = Names.Where(n => File.Exists(Path.Combine(to, n)) || Directory.Exists(Path.Combine(to, n))).ToList();
+        if (there.Count > 0) throw new Problem("כבר יש ב־" + to + " קבצים של ספרייה (" + string.Join(", ", there) + "). אפשר להתקין שם ספרייה במקומם, בכרטיס \"התקנת הספרייה\", או למחוק אותם ולנסות שוב.");
         CheckClosed();
         var wal = new FileInfo(Path.Combine(from, "seforim.db-wal"));
         if (wal.Exists && wal.Length > 0) throw new Problem("זית לא נסגרה כראוי (seforim.db-wal אינו ריק). יש לפתוח ולסגור אותה, ולנסות שוב.");
@@ -294,8 +340,9 @@ static class Library
             log("הועתקו " + Fmt.Size(total) + " ונבדקו.");
         }
 
+        DropPendingCleanup(to);
         PointZayitAt(to);
-        log("זית תפתח מעכשיו את הספרייה מהמקום החדש.");
+        log(Opens(to, "זית תפתח מעכשיו את הספרייה מהמקום החדש."));
         History.Add(keep ? "copy" : "move", from, to, total);
 
         if (!keep && !(sameDrive))
@@ -321,9 +368,10 @@ static class Library
         if (!Exists(dir)) throw new Problem("אין ספרייה ב־" + dir + ".");
         CheckClosed();
         var before = CurrentDir;
+        DropPendingCleanup(dir);
         PointZayitAt(dir);
         History.Add("switch", before, dir, Size(dir));
-        log("זית תפתח מעכשיו את הספרייה מ־" + Fmt.ShortPath(dir, 60));
+        log(Opens(dir, "זית תפתח מעכשיו את הספרייה מ־" + Fmt.ShortPath(dir, 60)));
     }
 
     // Zayit back to its own folder, whatever is there (with no library, Zayit offers to download one).

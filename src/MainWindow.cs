@@ -32,10 +32,12 @@ class MainWindow : Window
     string task;                    // what runs now ("העברה", "החזרה")
     long done, total;
     volatile string stage;          // what the work does now, under its progress bar
+    bool closeTried;                // the window was asked to close while the work runs
     DateTime started;
     readonly List<KeyValuePair<string, bool>> messages = new List<KeyValuePair<string, bool>>(); // text, is error
 
     TextBlock progressText, stageText;
+    Button stopBtn;
     Border progressFill, progressTrack;
 
     public MainWindow()
@@ -89,7 +91,7 @@ class MainWindow : Window
         {
             if (!busy) return;
             e.Cancel = true;
-            Say("יש לעצור את " + task + " לפני הסגירה.", true);
+            if (!closeTried) { closeTried = true; Render(); }
         };
         Render();
     }
@@ -136,9 +138,11 @@ class MainWindow : Window
         }
         else
         {
-            content.Children.Add(InstallCard(current, false));
             var restore = RestoreCard(current);
-            if (restore != null) content.Children.Add(restore);
+            bool copyFirst = restore != null && History.Copies(current).Count > 0;
+            if (copyFirst) content.Children.Add(restore);
+            content.Children.Add(InstallCard(current, false));
+            if (restore != null && !copyFirst) content.Children.Add(restore);
         }
         // Zayit's license (AGPL v3, its section 7b terms) asks every work built on it to show this
         var credit = Theme.T("Powered by the technologies that drive Zayit — https://zayitapp.com/", 11.5, "SUB");
@@ -151,7 +155,7 @@ class MainWindow : Window
     UIElement EnvNotice(string env)
     {
         var sp = new StackPanel();
-        sp.Children.Add(Theme.Note(Theme.G_INFO, "זית פותחת עכשיו ספרייה אחרת, שנקבעה בכלי הספרייה המוקטנת (משתנה הסביבה SEFORIMAPP_DATABASE_PATH). כל עוד היא קבועה, ההעברה כאן לא משנה מה זית פותחת.", "WARN", "WARNSOFT"));
+        sp.Children.Add(Theme.Note(Theme.G_INFO, "זית פותחת עכשיו ספרייה אחרת, שנקבעה בכלי הספרייה המוקטנת (משתנה הסביבה SEFORIMAPP_DATABASE_PATH). כל עוד היא קבועה, ההעברה וההתקנה כאן לא משנות מה זית פותחת.", "WARN", "WARNSOFT"));
         var p = Theme.PathText(env);
         p.Margin = new Thickness(0, 0, 0, 4);
         sp.Children.Add(p);
@@ -172,6 +176,8 @@ class MainWindow : Window
         {
             if (Library.IsSplit(current))
                 rows.Add(Theme.Note(Theme.G_WARN, "הספרייה כאן מפוצלת לחלקים (seforim.db001 ואילך), כמו שפרדס שומר אותה בכרטיס FAT32. זית למחשב לא יכולה לפתוח ספרייה כזו. אפשר להתקין למטה ספרייה שלמה, בכונן שאינו FAT32.", "RED", "REDSOFT"));
+            else if (Library.IsDefault(current) && Prefs.Get("database_path", "").Trim().Length == 0 && History.Copies(current).Count > 0)
+                rows.Add(Theme.Note(Theme.G_INFO, "זית לא מכוונת עכשיו לשום ספרייה, אבל יש עותק שלה במקום אחר: אפשר לעבור אליו למטה, או להתקין אותה מחדש.", "TEXT", "ACCENTSOFT"));
             else if (Library.IsDefault(current) && Prefs.Get("database_path", "").Trim().Length == 0)
                 rows.Add(Theme.Note(Theme.G_INFO, "עדיין אין ספרייה במחשב הזה. אפשר להתקין אותה למטה ישר לכל כונן, גם לכונן חיצוני או לכרטיס זיכרון, בלי 15 GB פנויים בכונן C שזית דורשת כשהיא מתקינה בעצמה.", "TEXT", "ACCENTSOFT"));
             else
@@ -238,6 +244,12 @@ class MainWindow : Window
             rows.Add(Theme.Row(Theme.Btn(this, "בחירה אחרת", "Outlined", () => { chosen = null; Render(); })));
             return Theme.Card(rows.ToArray());
         }
+        if (Library.IsSplit(chosen))
+        {
+            rows.Add(Theme.Note(Theme.G_WARN, "יש שם ספרייה מפוצלת לחלקים, כמו שפרדס שומר אותה בכרטיס FAT32. זית למחשב לא יכולה לפתוח אותה, והעברה לשם הייתה מוחקת אותה. אפשר להתקין שם ספרייה שלמה במקומה, בכרטיס \"התקנת הספרייה\".", "RED", "REDSOFT"));
+            rows.Add(Theme.Row(Theme.Btn(this, "בחירה אחרת", "Outlined", () => { chosen = null; Render(); })));
+            return Theme.Card(rows.ToArray());
+        }
         if (Library.Exists(chosen))
         {
             var v = Library.Version(chosen);
@@ -298,12 +310,13 @@ class MainWindow : Window
         }
         if (installTo == null)
         {
-            rows.Add(Theme.T("הספרייה נכנסת ישר לכונן או לתיקייה שתבחרו, לתיקייה \"" + Library.FolderName + "\" שבתוכם, בלי לעבור דרך כונן C: מהאינטרנט (הורדה של כ־5.5 GB), או מקובצי ההפצה part01, part02 וכן הלאה שכבר הורדו. אם כבר יש ספרייה במקום שתבחרו, אפשר לעבור אליה בלי להתקין.", 13, "SUB"));
+            rows.Add(Theme.T("הספרייה נכנסת ישר לכונן או לתיקייה שתבחרו, לתיקייה \"" + Library.FolderName + "\" שבתוכם, בלי לעבור דרך כונן C. אפשר להוריד אותה מהאינטרנט (כ־" + Fmt.Size(Installer.TypicalBundle) + "), או להתקין מקובצי ההפצה part01, part02 וכן הלאה שכבר הורדו. אם כבר יש ספרייה במקום שתבחרו, אפשר לעבור אליה בלי להתקין.", 13, "SUB"));
             var pick = Theme.IconBtn(this, Theme.G_FOLDER, "בחירת מקום…", "Outlined", () =>
             {
                 var f = FolderPicker.Pick(this, "לאן להתקין את הספרייה של זית?");
                 if (f == null) return;
                 installTo = Library.Destination(f);
+                filesError = null;
                 messages.Clear();
                 Render();
             });
@@ -324,12 +337,18 @@ class MainWindow : Window
             var v = Library.Version(installTo);
             rows.Add(Theme.Note(Theme.G_INFO, "כבר יש שם ספרייה (" + Fmt.Size(Library.Size(installTo)) + (v != null ? ", מהדורה " + v : "") + "). אפשר לעבור אליה בלי להתקין דבר, או להתקין במקומה.", "TEXT", "ACCENTSOFT"));
             var to = installTo;
-            rows.Add(Theme.Row(Theme.Btn(this, "מעבר אליה", "Default", () => Quick(() => { Library.SwitchTo(to, Log); installTo = null; installing = false; }))));
+            rows.Add(Theme.Row(Theme.Btn(this, "מעבר אליה", "Default", () => Quick(() =>
+            {
+                Library.SwitchTo(to, Log);
+                installTo = null; installing = false; files = null; filesError = null; fromFiles = false;
+            }))));
         }
         else if (Library.IsSplit(installTo))
             rows.Add(Theme.Note(Theme.G_INFO, "יש שם ספרייה מפוצלת לחלקים, כמו שפרדס שומר אותה בכרטיס FAT32, וזית למחשב לא יכולה לפתוח אותה. ההתקנה תחליף אותה בספרייה שלמה.", "TEXT", "ACCENTSOFT"));
 
-        var online = new RadioButton { Content = "הורדה מהאינטרנט (כ־5.5 GB)", IsChecked = !fromFiles, Margin = new Thickness(0, 12, 0, 0) };
+        if (Library.EnvOverride != null)
+            rows.Add(Theme.Note(Theme.G_INFO, "זית פותחת עכשיו את הספרייה שנקבעה ב־SEFORIMAPP_DATABASE_PATH (למעלה), ותמשיך לפתוח אותה גם אחרי ההתקנה, עד שמבטלים את ההפניה.", "WARN", "WARNSOFT"));
+        var online = new RadioButton { Content = "הורדה מהאינטרנט (כ־" + Fmt.Size(Installer.TypicalBundle) + ")", IsChecked = !fromFiles, Margin = new Thickness(0, 12, 0, 0) };
         var offline = new RadioButton { Content = "מקובצי ההפצה שכבר הורדו (part01, part02…)", IsChecked = fromFiles, Margin = new Thickness(0, 8, 0, 0) };
         online.Checked += (s, e) => { fromFiles = false; Render(); };
         offline.Checked += (s, e) => { fromFiles = true; Render(); };
@@ -360,10 +379,15 @@ class MainWindow : Window
         long need = Installer.Unpacked(fromFiles && files != null ? files.Size : Installer.TypicalBundle) + Library.Margin;
         long free = Library.Free(installTo);
         bool fat = Library.IsFat(installTo);
+        // An install that did not finish (a crash, a card pulled out) leaves its staging; the next one deletes it
+        long leftover = Library.TreeSize(Installer.StagingOf(installTo));
+        if (free >= 0) free += leftover;
+        if (leftover > 0)
+            rows.Add(Theme.Note(Theme.G_INFO, "נמצאה שם תיקייה זמנית מהתקנה קודמת שלא הסתיימה (" + Fmt.Size(leftover) + "). היא תימחק בתחילת ההתקנה.", "TEXT", "ACCENTSOFT"));
         var needRow = Theme.Pair("נדרשים", "כ־" + Fmt.Size(need));
         needRow.Margin = new Thickness(0, 12, 0, 2);
         rows.Add(needRow);
-        if (free >= 0) rows.Add(Theme.Pair("פנויים שם", Fmt.Size(free)));
+        if (free >= 0) rows.Add(Theme.Pair(leftover > 0 ? "פנויים שם, עם התיקייה הזמנית" : "פנויים שם", Fmt.Size(free)));
         if (free < 0) rows.Add(Theme.Note(Theme.G_WARN, "הכונן לא זמין.", "RED", "REDSOFT"));
         else if (fat) rows.Add(Theme.Note(Theme.G_WARN, Library.FatText(installTo), "RED", "REDSOFT"));
         else if (free < need)
@@ -375,7 +399,7 @@ class MainWindow : Window
         {
             var to = installTo;
             var b = fromFiles ? files : null;
-            Run("ההתקנה", () => Installer.Install(b, to, Progress, () => stop, Log, Stage), () => { installTo = null; installing = false; files = null; fromFiles = false; });
+            Run("ההתקנה", () => Installer.Install(b, to, Progress, () => stop, Log, Stage), () => { installTo = null; installing = false; files = null; filesError = null; fromFiles = false; });
         });
         go.IsEnabled = free >= need && !fat && (!fromFiles || files != null);
         rows.Add(Theme.Row(go, Theme.Btn(this, "ביטול", "Outlined", () => { installTo = null; files = null; filesError = null; fromFiles = false; installing = false; Render(); })));
@@ -407,7 +431,7 @@ class MainWindow : Window
         var copies = History.Copies(current);
         bool has = Library.Exists(current);
         bool back = last != null && Library.Same(last.To, current) && has && !Library.Exists(last.From);
-        if (last == null && copies.Count == 0 && has) return null;
+        if (last == null && copies.Count == 0 && (has || Library.IsDefault(current))) return null;
 
         var rows = new List<UIElement> { Theme.Title("שחזור") };
         if (last != null)
@@ -429,7 +453,7 @@ class MainWindow : Window
 
         foreach (var dir in copies) rows.Add(CopyRow(dir, last));
 
-        if (!has && copies.Count == 0)
+        if (!has && copies.Count == 0 && !Library.IsDefault(current))
         {
             rows.Add(Theme.T("אין עותק אחר של הספרייה. אפשר להחזיר את זית לתיקייה הרגילה שלה; אם אין שם ספרייה, זית תציע להוריד אותה.", 13, "SUB"));
             if (!confirmReset)
@@ -489,6 +513,8 @@ class MainWindow : Window
         stop = false;
         task = name;
         stage = null;
+        closeTried = false;
+        lastTick = -1000;
         done = 0;
         total = 0;
         started = DateTime.Now;
@@ -510,13 +536,14 @@ class MainWindow : Window
         worker.Start();
     }
 
+    static readonly System.Diagnostics.Stopwatch clock = System.Diagnostics.Stopwatch.StartNew();
     long lastTick;
 
     void Progress(long d, long t)
     {
         done = d;
         total = t;
-        long now = Environment.TickCount;
+        long now = clock.ElapsedMilliseconds;
         if (now - lastTick < 120 && d < t) return;
         lastTick = now;
         Dispatcher.BeginInvoke(new Action(UpdateProgress));
@@ -527,11 +554,13 @@ class MainWindow : Window
         progressFill = new Border { Background = Theme.B("ACCENT"), CornerRadius = new CornerRadius(3), HorizontalAlignment = HorizontalAlignment.Left, Width = 0 };
         progressTrack = new Border { Height = 6, CornerRadius = new CornerRadius(3), Background = Theme.B("BORDER"), Child = progressFill, Margin = new Thickness(0, 6, 0, 8) };
         progressTrack.SizeChanged += (s, e) => UpdateProgress();
-        progressText = Theme.T("מתחיל…", 13, "SUB");
+        progressText = Theme.T(stop ? "עוצר…" : "מתחיל…", 13, "SUB");
         stageText = Theme.T(stage ?? "", 13);
         stageText.Visibility = stage == null ? Visibility.Collapsed : Visibility.Visible;
-        var stopBtn = Theme.Btn(this, "עצירה", "Outlined", () => { stop = true; progressText.Text = "עוצר…"; });
-        return Theme.Card(Theme.Title(task == null ? "" : task.Substring(1)), stageText, progressTrack, progressText, Theme.Row(stopBtn),
+        stopBtn = Theme.Btn(this, "עצירה", "Outlined", () => { stop = true; progressText.Text = "עוצר…"; });
+        stopBtn.IsEnabled = stage != Installer.Committing;
+        var closing = closeTried ? Theme.Note(Theme.G_WARN, "יש לעצור את " + task + " לפני הסגירה.", "WARN", "WARNSOFT") : null;
+        return Theme.Card(Theme.Title(task == null ? "" : task.Substring(1)), closing, stageText, progressTrack, progressText, Theme.Row(stopBtn),
                     Theme.T(task == "ההתקנה"
                         ? "אפשר לעצור בכל רגע לפני הסוף: מה שכבר נכתב נמחק, ושום דבר אחר לא משתנה."
                         : "אפשר לעצור בכל רגע לפני הסוף: העותק החלקי נמחק והספרייה נשארת במקומה.", 12, "SUB"));
@@ -550,11 +579,14 @@ class MainWindow : Window
             var s = stage;
             stageText.Text = s ?? "";
             stageText.Visibility = s == null ? Visibility.Collapsed : Visibility.Visible;
+            if (stopBtn != null) stopBtn.IsEnabled = s != Installer.Committing;
         }
         if (progressFill == null || total <= 0) return;
         double f = Math.Min(1, done / (double)total);
         progressFill.Width = Math.Max(0, (progressTrack.ActualWidth) * f);
         if (stop) return;
+        // All read: what follows (the check, the wait for Zayit) is told by the stage line
+        if (done >= total) { progressText.Text = Fmt.Size(total); return; }
         var secs = (DateTime.Now - started).TotalSeconds;
         string speed = "", left = "";
         if (secs > 2 && done > 0)

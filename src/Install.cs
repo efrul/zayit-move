@@ -27,7 +27,15 @@ static class Installer
 
     public static long Unpacked(long bundleSize) { return bundleSize / 5 * 12; }
 
+    // The stage shown while the new library takes the old one's place: a few renames, past stopping.
+    public const string Committing = "מכניס את הספרייה למקומה…";
+
     const string StoppedText = "ההתקנה נעצרה, ומה שכבר נכתב נמחק. שום דבר אחר לא השתנה.";
+
+    // The folders next to `to` that an install uses: the new library while it is unpacked, the old one while it is
+    // replaced.
+    public static string StagingOf(string to) { return to.TrimEnd(Path.DirectorySeparatorChar) + ".installing"; }
+    static string OldOf(string to) { return to.TrimEnd(Path.DirectorySeparatorChar) + ".old"; }
 
     // Installs `bundle` (null: the latest release, downloaded) into `to`, replacing a library already there only once
     // the new one is complete and checked, and points Zayit at it.
@@ -36,40 +44,51 @@ static class Installer
         to = Path.GetFullPath(to);
         if (Library.IsFat(to)) throw new Problem(Library.FatText(to));
         string before = Library.CurrentDir;
-        string staging = to.TrimEnd(Path.DirectorySeparatorChar) + ".installing";
+        string staging = StagingOf(to), old = OldOf(to);
+        // Windows takes paths of up to 260 characters here (248 for a folder); the bundle's longest name is 54
+        if (staging.Length + 64 >= 248) throw new Problem("הנתיב " + Fmt.ShortPath(to, 60) + " ארוך מדי לקובצי הספרייה. כדאי לבחור תיקייה קרובה יותר לשורש הכונן.");
         bool done = false;
         try
         {
+            // What an earlier install left: a stop or a crash its staging, a failed swap the old library
+            Library.Remove(staging);
+            if (Directory.Exists(old))
+            {
+                if (File.Exists(Path.Combine(old, "seforim.db")))
+                    throw new Problem("בתיקייה " + old + " נשארה הספרייה הקודמת, מהחלפה שלא הסתיימה. כדאי לבדוק אם צריך ממנה משהו ולמחוק אותה, ואז להתקין שוב.");
+                if (!Library.Remove(old)) throw new Problem("לא ניתן למחוק את התיקייה " + old + ", שנשארה מהתקנה קודמת. כדאי למחוק אותה ידנית ולנסות שוב.");
+            }
             if (bundle == null)
             {
                 stage("מחפש את המהדורה האחרונה של הספרייה…");
-                bundle = Bundle.Latest();
+                bundle = Bundle.Latest(cancelled);
             }
+            if (cancelled()) throw new Stopped();
             long need = Unpacked(bundle.Size) + Library.Margin;
             long free = Library.Free(to);
             if (free < 0) throw new Problem("הכונן " + Path.GetPathRoot(to) + " לא זמין.");
             if (free < need) throw new Problem("אין מספיק מקום ב־" + Path.GetPathRoot(to) + ": צריך כ־" + Fmt.Size(need) + ", פנויים " + Fmt.Size(free) + ".");
 
-            // A folder of ours left by a stop or a crash goes first
-            Library.Remove(staging);
             Directory.CreateDirectory(staging);
             Unpack(bundle, staging, progress, cancelled, stage);
             stage("בודק את הספרייה…");
             Check(staging);
-            while (Library.ZayitRunning())
+            for (;;)
             {
+                if (cancelled()) throw new Stopped();
+                if (!Library.ZayitRunning()) break;
                 stage("זית פתוחה. כדי לסיים צריך לסגור אותה, וההתקנה תמשיך מעצמה.");
-                if (cancelled()) throw new Stopped(StoppedText);
                 Thread.Sleep(500);
             }
-            stage("מכניס את הספרייה למקומה…");
-            Swap(staging, to);
+            stage(Committing);
+            Swap(staging, to, old, log);
             done = true;
         }
         catch (Stopped) { throw new Stopped(StoppedText); }
         catch (Problem) { throw; }
         catch (InvalidDataException e) { throw new Problem("קובצי הספרייה פגומים (" + e.Message + "). שום דבר לא השתנה."); }
         catch (EndOfStreamException) { throw new Problem("קובצי הספרייה נגמרים לפני הסוף: אולי אחד החלקים לא ירד עד הסוף. שום דבר לא השתנה."); }
+        catch (PathTooLongException) { throw new Problem("הנתיב " + Fmt.ShortPath(to, 60) + " ארוך מדי לקובצי הספרייה. כדאי לבחור תיקייה קרובה יותר לשורש הכונן."); }
         catch (NotSupportedException e) { throw new Problem("הכלי לא יודע לפרוס את המהדורה הזו של הספרייה (" + e.Message + "). שום דבר לא השתנה."); }
         catch (OutOfMemoryException) { throw new Problem("אין מספיק זיכרון לפריסת הספרייה (צריך כ־200 MB פנויים). כדאי לסגור תוכנות אחרות ולנסות שוב."); }
         catch (WebException e) { throw new Problem("אין חיבור ל־GitHub (" + e.Message + "). כדאי לבדוק את החיבור לאינטרנט ולנסות שוב."); }
@@ -78,20 +97,21 @@ static class Installer
         {
             if (e is IOException && (e.HResult == unchecked((int)0x80070070) || e.HResult == unchecked((int)0x80070027)))
                 throw new Problem("נגמר המקום ב־" + Path.GetPathRoot(to) + " באמצע ההתקנה. שום דבר לא השתנה.");
-            throw new Problem("ההתקנה נכשלה: " + e.Message + " שום דבר לא השתנה.");
+            throw new Problem("ההתקנה נכשלה: " + e.Message.TrimEnd('.') + ". שום דבר לא השתנה.");
         }
         finally
         {
             if (!done) Library.Remove(staging);
         }
 
+        Library.DropPendingCleanup(to);
         Library.PointZayitAt(to);
         long size = Library.Size(to);
-        History.Add("install", "", to, size);
+        History.Add("install", before, to, size);
         var v = Library.Version(to);
         log("הספרייה הותקנה ונבדקה: " + Fmt.Size(size) + (v != null ? ", מהדורה " + v : "") + ".");
-        log("זית תפתח מעכשיו את הספרייה מ־" + Fmt.ShortPath(to, 60));
-        if (Prefs.Get("onboarding_finished", "") != "true")
+        log(Library.Opens(to, "זית תפתח מעכשיו את הספרייה מ־" + Fmt.ShortPath(to, 60)));
+        if (Library.EnvOverride == null && Prefs.Get("onboarding_finished", "") != "true")
             log("בפתיחה הראשונה זית תמצא את הספרייה ותדלג על ההורדה שלה ועל בדיקת המקום בכונן C.");
         if (!Library.Same(before, to) && Library.Exists(before))
             log("הספרייה הקודמת נשארה ב־" + Fmt.ShortPath(before, 60) + ". אפשר למחוק אותה למטה, בשחזור.");
@@ -153,15 +173,13 @@ static class Installer
         if (!Library.Whole(Path.Combine(dir, "seforim.db"))) throw new Problem("מסד הנתונים seforim.db שבקובצי הספרייה אינו שלם. שום דבר לא השתנה.");
     }
 
-    // Puts what is in `staging` in place of the library at `to`. The old library is moved aside first, its database
-    // first of all, and the new database comes in last, so the folder never looks like a library while it is half
-    // the one and half the other. Staging and `to` are side by side, so these are renames; if one fails, those done
-    // are undone and the old library stays.
-    static void Swap(string staging, string to)
+    // Puts what is in `staging` in place of the library at `to`. The old library is moved aside into `old` first, its
+    // database first of all, and the new database comes in last, so the folder never looks like a library while it is
+    // half the one and half the other. Staging and `to` are side by side, so these are renames; if one fails, those
+    // done are undone and the old library stays.
+    static void Swap(string staging, string to, string old, Action<string> log)
     {
         Directory.CreateDirectory(to);
-        string old = to.TrimEnd(Path.DirectorySeparatorChar) + ".old";
-        Library.Remove(old);
         Directory.CreateDirectory(old);
         var incoming = Directory.GetFileSystemEntries(staging).Select(Path.GetFileName).ToList();
         var aside = new List<string> { "seforim.db" };
@@ -180,14 +198,18 @@ static class Installer
         }
         catch (Exception e)
         {
+            var stuck = new List<string>();
             for (int i = moves.Count - 1; i >= 0; i--)
             {
-                try { Move(moves[i].Value, moves[i].Key); } catch { }
+                try { Move(moves[i].Value, moves[i].Key); }
+                catch { if (moves[i].Value.StartsWith(old, StringComparison.OrdinalIgnoreCase)) stuck.Add(Path.GetFileName(moves[i].Key)); }
             }
             Library.TryRemoveEmpty(old);
-            throw new Problem("הכנסת הספרייה למקומה נכשלה (" + e.Message + "). הספרייה שהייתה שם נשארה כמו שהייתה.");
+            if (stuck.Count == 0) throw new Problem("הכנסת הספרייה למקומה נכשלה (" + e.Message.TrimEnd('.') + "). הספרייה שהייתה שם נשארה כמו שהייתה.");
+            throw new Problem("הכנסת הספרייה למקומה נכשלה (" + e.Message.TrimEnd('.') + "), וגם ההחזרה לא הושלמה: " + string.Join(", ", stuck) +
+                              " של הספרייה הקודמת נשארו בתיקייה " + old + ". אפשר להחזיר אותם ידנית ל־" + to + ".");
         }
-        Library.Remove(old);
+        if (!Library.Remove(old)) log("מה שנשאר מהספרייה הקודמת, בתיקייה " + Fmt.ShortPath(old, 60) + ", לא נמחק כולו. אפשר למחוק אותו ידנית.");
         Library.TryRemoveEmpty(staging);
     }
 
@@ -198,9 +220,21 @@ static class Installer
         moves.Add(new KeyValuePair<string, string>(from, to));
     }
 
+    // A rename, tried again for a few seconds: a file just closed may still be held for a moment by an indexer or an
+    // antivirus.
     static void Move(string from, string to)
     {
-        if (Directory.Exists(from)) Directory.Move(from, to); else File.Move(from, to);
+        for (int i = 0; ; i++)
+        {
+            try
+            {
+                if (Directory.Exists(from)) Directory.Move(from, to); else File.Move(from, to);
+                return;
+            }
+            catch (IOException) { if (i >= 10) throw; }
+            catch (UnauthorizedAccessException) { if (i >= 10) throw; }
+            Thread.Sleep(300);
+        }
     }
 
     // Writes the files on a thread of its own: Windows writes to removable drives without a cache, so the card's
@@ -329,22 +363,45 @@ sealed class Bundle
 
     // The latest release: its tag from where GitHub sends .../releases/latest/download/<manifest>, then that release's
     // manifest, so every part comes from the same release even if a new one comes out meanwhile.
-    public static Bundle Latest()
+    public static Bundle Latest(Func<bool> cancelled)
     {
-        Uri at;
-        try { at = Http.Redirect(new Uri(Releases + "/latest/download/" + Name + ManifestSuffix)); }
-        catch (HttpError e)
+        using (var watch = new RequestWatch(cancelled))
         {
-            if (e.Code == 404) throw new Problem("לא נמצאה מהדורה של הספרייה להורדה. אפשר לנסות שוב מאוחר יותר.");
-            throw new Problem("GitHub השיב " + e.Code + ". אפשר לנסות שוב מאוחר יותר.");
+            var at = Fetch(() => Http.Redirect(new Uri(Releases + "/latest/download/" + Name + ManifestSuffix), watch.Set), cancelled);
+            var m = Regex.Match(at == null ? "" : at.AbsolutePath, "/releases/download/([^/]+)/");
+            if (!m.Success) throw new Problem("לא נמצאה מהדורה של הספרייה להורדה. אפשר לנסות שוב מאוחר יותר.");
+            var tag = Uri.UnescapeDataString(m.Groups[1].Value);
+            var base_ = Releases + "/download/" + Uri.EscapeDataString(tag) + "/";
+            var b = FromManifest(Fetch(() => Http.Text(new Uri(base_ + Name + ManifestSuffix), watch.Set), cancelled), null, base_);
+            b.Release = tag;
+            return b;
         }
-        var m = Regex.Match(at == null ? "" : at.AbsolutePath, "/releases/download/([^/]+)/");
-        if (!m.Success) throw new Problem("לא נמצאה מהדורה של הספרייה להורדה. אפשר לנסות שוב מאוחר יותר.");
-        var tag = Uri.UnescapeDataString(m.Groups[1].Value);
-        var base_ = Releases + "/download/" + Uri.EscapeDataString(tag) + "/";
-        var b = FromManifest(Http.Text(new Uri(base_ + Name + ManifestSuffix)), null, base_);
-        b.Release = tag;
-        return b;
+    }
+
+    // A small request, tried three times (2 and 4 seconds apart) when GitHub or the network fails for a moment.
+    static T Fetch<T>(Func<T> get, Func<bool> cancelled)
+    {
+        for (int attempt = 1; ; attempt++)
+        {
+            try { return get(); }
+            catch (Exception e)
+            {
+                if (cancelled()) throw new Stopped();
+                var http = e as HttpError;
+                bool passing = http != null ? http.Code >= 500 || http.Code == 408 || http.Code == 429 : e is IOException || e is WebException;
+                if (!passing || attempt == 3)
+                {
+                    if (http != null && http.Code == 404) throw new Problem("לא נמצאה מהדורה של הספרייה להורדה. אפשר לנסות שוב מאוחר יותר.");
+                    if (http != null) throw new Problem("GitHub השיב " + http.Code + ". אפשר לנסות שוב מאוחר יותר.");
+                    throw;
+                }
+            }
+            for (int t = 0; t < 2000 * attempt; t += 250)
+            {
+                if (cancelled()) throw new Stopped();
+                Thread.Sleep(250);
+            }
+        }
     }
 
     // Parts on disk, from the files picked: any part (the others are found next to it), all of them, or the manifest.
@@ -445,12 +502,11 @@ sealed class PartsStream : Stream
 {
     readonly Bundle bundle;
     readonly Func<bool> cancelled;
-    readonly Timer watch;
+    readonly RequestWatch watch;
     int index = -1;
     long partPos, done;
     Stream cur;
     HttpWebResponse response;
-    volatile HttpWebRequest request;
     HashAlgorithm sha;
     int failures;
 
@@ -458,12 +514,7 @@ sealed class PartsStream : Stream
     {
         this.bundle = bundle;
         this.cancelled = cancelled;
-        // A stop also ends a download that waits on the network
-        watch = new Timer(_ =>
-        {
-            var r = request;
-            if (r != null && cancelled()) { try { r.Abort(); } catch { } }
-        }, null, 500, 500);
+        watch = new RequestWatch(cancelled);
     }
 
     // Bytes of all parts read so far.
@@ -536,7 +587,7 @@ sealed class PartsStream : Stream
             cur = new FileStream(p.File, FileMode.Open, FileAccess.Read, FileShare.Read, 1 << 20, FileOptions.SequentialScan);
             return;
         }
-        response = Http.Open(new Uri(p.Url), partPos, r => request = r);
+        response = Http.Open(new Uri(p.Url), partPos, watch.Set);
         cur = response.GetResponseStream();
         // A server that ignored the range starts from the beginning
         long skip = partPos - Http.StartOf(response);
@@ -552,7 +603,7 @@ sealed class PartsStream : Stream
 
     void Disconnect()
     {
-        request = null;
+        watch.Set(null);
         if (cur != null) { try { cur.Dispose(); } catch { } cur = null; }
         if (response != null) { try { response.Close(); } catch { } response = null; }
     }
@@ -596,6 +647,25 @@ sealed class PartsStream : Stream
     }
 }
 
+// Aborts the request on its way when the user stops, so a stop also ends a wait on the network.
+sealed class RequestWatch : IDisposable
+{
+    readonly Timer timer;
+    volatile HttpWebRequest current;
+
+    public RequestWatch(Func<bool> cancelled)
+    {
+        timer = new Timer(_ =>
+        {
+            var r = current;
+            if (r != null && cancelled()) { try { r.Abort(); } catch { } }
+        }, null, 500, 500);
+    }
+
+    public void Set(HttpWebRequest r) { current = r; }
+    public void Dispose() { timer.Dispose(); }
+}
+
 // HTTP for the download. Redirects are followed by hand: GitHub sends each release file to a signed address that
 // expires within the hour, so every connection, a resumed one too, starts again from the github.com address.
 static class Http
@@ -631,9 +701,11 @@ static class Http
     }
 
     // Where `url` redirects to, or null when it does not.
-    public static Uri Redirect(Uri url)
+    public static Uri Redirect(Uri url, Action<HttpWebRequest> started)
     {
-        using (var resp = Get(Request(url, 0)))
+        var r = Request(url, 0);
+        if (started != null) started(r);
+        using (var resp = Get(r))
         {
             int code = (int)resp.StatusCode;
             var loc = resp.Headers["Location"];
@@ -644,9 +716,9 @@ static class Http
     }
 
     // A small text file (the manifest).
-    public static string Text(Uri url)
+    public static string Text(Uri url, Action<HttpWebRequest> started)
     {
-        using (var resp = Open(url, 0, null))
+        using (var resp = Open(url, 0, started))
         using (var s = resp.GetResponseStream())
         using (var mem = new MemoryStream())
         {
